@@ -1,0 +1,150 @@
+-- [ --------------------------------------------------------------------- ] --
+-- [ RedNetChat                                                            ] --
+-- [ A public chat client for ComputerCraft                                ] --
+-- [ Created by GPG Incorporated.                                          ] --
+-- [ --------------------------------------------------------------------- ] --
+
+-- Indicates if the application is running
+local RUNNING = false
+
+-- Url of the api
+local API_URL = "http://rednetchat.gpgautier.nl/api.php"
+
+-- Queue with all the requests
+local REQUEST_QUEUE = {}
+
+-- Indicates if there is a request loading
+local REQUEST_LOADING = false
+
+-- Protocol to use for sending and recieving messages
+local PROTOCOL = "rednet"
+
+-- ID of this client
+local ID = os.computerID()
+
+-- Nickname for the user in chat
+local NICKNAME = ""
+
+-- ID for the chat session
+local SESSION = nil
+
+-- Process the request queue and send a request when queued
+function processQueue()
+  -- only process when there is no request loading
+  if not REQUEST_LOADING then
+    if REQUEST_QUEUE[1] ~= nil then
+      REQUEST_LOADING = true
+      http.request(API_URL, REQUEST_QUEUE[1])
+      table.remove(REQUEST_QUEUE, 1)
+    end
+  end
+end
+
+-- Add a request to the queue
+function addRequest(method, parameters)
+  local key, value, request
+
+  -- assemble the request url form the method and parameters
+  request = "?protocol=" .. PROTOCOL
+  request = request .. "&session=" .. tostring(SESSION)
+  request = request .. "&sender=" .. ID
+  request = request .. "&nickname=" .. NICKNAME
+  request = request .. "&method=" .. method
+
+  if parameters ~= nil then
+    for key, value in pairs(parameters) do
+      request = request .. "&" .. key .. "=" .. value
+    end
+  end
+  
+  -- add the request to the queue
+  table.insert(REQUEST_QUEUE, request)
+
+  -- start processing the request queue
+  processQueue()
+end
+
+-- Handles all OS events
+function handleEvents()
+  local type, param1, param2, param3, param4
+
+  while RUNNING do
+    type, param1, param2, param3, param4 = os.pullEvent()
+
+    -- Handles incoming http events
+    if type == "http_failure" or type == "http_success" then
+      if param2 ~= nil then
+        param2 = param2.readAll()
+      end
+      
+      term.setCursorPos(1, 2)
+
+      if type == "http_success" then
+        handleResponse(textutils.unserialize(param2))
+      end
+
+      -- indicate that the request is finished loading and load next request
+      REQUEST_LOADING = false
+      processQueue()
+    end
+  end
+end
+
+-- Handles http responses
+function handleResponse(response) 
+  -- check if the protocol matches
+  if response.protocol ~= PROTOCOL then
+    return
+  end
+  
+  -- check for correct origin
+  if tonumber(response.sender) ~= ID then
+    return
+  end
+
+  if response.method == "join" then
+    SESSION = response.session
+  elseif response.method == "leave" then
+  
+  end
+end
+
+function updateBuffer()
+  while RUNNING do
+    addRequest("update")
+    sleep(1)
+  end
+end
+
+-- Application entry
+function main()
+  RUNNING = true
+
+  term.clear()
+  
+  while NICKNAME == "" do
+    term.setCursorPos(1, 1)
+    term.clearLine()
+    term.write("Username: ")
+
+    NICKNAME = read()
+  end
+
+  addRequest("join")
+
+  while RUNNING do
+    local msg = ""
+
+    while msg == "" do
+      term.setCursorPos(1, 1)
+      term.clearLine()
+      term.write("Send > ")
+
+      msg = read()
+    end
+
+    addRequest(msg)
+  end
+end
+
+parallel.waitForAll(main, handleEvents, updateBuffer)
