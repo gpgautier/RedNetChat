@@ -1,150 +1,372 @@
 -- [ --------------------------------------------------------------------- ] --
--- [ RedNetChat                                                            ] --
--- [ A public chat client for ComputerCraft                                ] --
--- [ Created by GPG Incorporated.                                          ] --
+-- [ RedNetChat - A public chat program for ComputerCraft                  ] --
+-- [ Created by gpgautier (ign gpgauier), 2012                             ] --
+-- [ Licence: Creative Commons Attribution-ShareAlike 3.0 Unported License ] --
+-- [ ComputerCraft version: 1.3 and up                                     ] --
+-- [ Posted to:                                                            ] --
+-- [ GitHub: https://github.com/gpgautier/RedNetChat                       ] --
+-- [ Pastebin: http://pastebin.com/JDU4wJxX                                ] --
 -- [ --------------------------------------------------------------------- ] --
 
--- Indicates if the application is running
-local RUNNING = false
+local VERSION = "0.5"
+local MODEM = nil
+local NICKNAME = nil
+local ACTIVE = false
+local BUFFER = {}
+local POINTER = 0
+local ONLINE = {}
+local ISONLINE = false
 
--- Url of the api
-local API_URL = "http://rednetchat.gpgautier.nl/api.php"
-
--- Queue with all the requests
-local REQUEST_QUEUE = {}
-
--- Indicates if there is a request loading
-local REQUEST_LOADING = false
-
--- Protocol to use for sending and recieving messages
-local PROTOCOL = "rednet"
-
--- ID of this client
-local ID = os.computerID()
-
--- Nickname for the user in chat
-local NICKNAME = ""
-
--- ID for the chat session
-local SESSION = nil
-
--- Process the request queue and send a request when queued
-function processQueue()
-  -- only process when there is no request loading
-  if not REQUEST_LOADING then
-    if REQUEST_QUEUE[1] ~= nil then
-      REQUEST_LOADING = true
-      http.request(API_URL, REQUEST_QUEUE[1])
-      table.remove(REQUEST_QUEUE, 1)
-    end
-  end
-end
-
--- Add a request to the queue
-function addRequest(method, parameters)
-  local key, value, request
-
-  -- assemble the request url form the method and parameters
-  request = "?protocol=" .. PROTOCOL
-  request = request .. "&session=" .. tostring(SESSION)
-  request = request .. "&sender=" .. ID
-  request = request .. "&nickname=" .. NICKNAME
-  request = request .. "&method=" .. method
-
-  if parameters ~= nil then
-    for key, value in pairs(parameters) do
-      request = request .. "&" .. key .. "=" .. value
-    end
-  end
-  
-  -- add the request to the queue
-  table.insert(REQUEST_QUEUE, request)
-
-  -- start processing the request queue
-  processQueue()
-end
-
--- Handles all OS events
-function handleEvents()
-  local type, param1, param2, param3, param4
-
-  while RUNNING do
-    type, param1, param2, param3, param4 = os.pullEvent()
-
-    -- Handles incoming http events
-    if type == "http_failure" or type == "http_success" then
-      if param2 ~= nil then
-        param2 = param2.readAll()
-      end
-      
-      term.setCursorPos(1, 2)
-
-      if type == "http_success" then
-        handleResponse(textutils.unserialize(param2))
-      end
-
-      -- indicate that the request is finished loading and load next request
-      REQUEST_LOADING = false
-      processQueue()
-    end
-  end
-end
-
--- Handles http responses
-function handleResponse(response) 
-  -- check if the protocol matches
-  if response.protocol ~= PROTOCOL then
-    return
-  end
-  
-  -- check for correct origin
-  if tonumber(response.sender) ~= ID then
-    return
-  end
-
-  if response.method == "join" then
-    SESSION = response.session
-  elseif response.method == "leave" then
-  
-  end
-end
-
-function updateBuffer()
-  while RUNNING do
-    addRequest("update")
-    sleep(1)
-  end
-end
+-- [ --------------------------------------------------------------------- ] --
 
 -- Application entry
 function main()
-  RUNNING = true
-
   term.clear()
-  
-  while NICKNAME == "" do
-    term.setCursorPos(1, 1)
-    term.clearLine()
-    term.write("Username: ")
+  term.setCursorPos(1, 1)
+  print("Starting RedNetChat " .. VERSION)
 
-    NICKNAME = read()
+  if not setPeripherals() then
+    return false
+  end
+  
+  print("")
+  print("")
+  print("Peripherals are setup.")
+  print("")
+  term.write("Starting application")
+  
+  welcome()
+end
+
+-- Set the attached peripherals. Opens rednet modem and warps monitor
+function setPeripherals()
+  local i, side
+
+  for i, side in pairs(redstone.getSides()) do
+    if peripheral.isPresent(side) then
+      if peripheral.getType(side) == "modem" then
+        MODEM = side
+        print("")
+        term.write("Opening modem on " .. side)
+        rednet.open(MODEM)
+      end
+    end
+  end
+  
+  -- Exit with a fatal error when modem not found
+  if MODEM == nil then
+    print("[FATAL ERROR] No modem was detected. Plase attach a modem on any side.")
+    return false
   end
 
-  addRequest("join")
+  return true
+end
 
-  while RUNNING do
-    local msg = ""
+-- Start the welcome screen
+function welcome()
+  local x, y
 
-    while msg == "" do
-      term.setCursorPos(1, 1)
-      term.clearLine()
-      term.write("Send > ")
+  term.clear()
+  writeHeader()
+  print("")
+  print("")
+  print("Enter a nickname and press [enter].")
+  print("")
+  term.write("Nickname: ")
+  
+  x, y = term.getCursorPos()
 
-      msg = read()
+  while NICKNAME == nil or NICKNAME == "" do
+    term.setCursorPos(x, y)
+    NICKNAME = read()
+    execute("/online")
+    appendBuffer("[RedNet Chat]: Type /help for a list of commands")
+  end
+  
+  start()
+end
+
+-- Writes the screen header
+function writeHeader()
+  term.setCursorPos(1, 1)
+  term.write("RedNet Chat " .. VERSION .. "           by GPG Incorporated")
+  term.setCursorPos(1, 2)
+  term.write("--------------------------------------------------")
+end
+
+-- Writes the list of online users
+function writeOnlineList()
+  local i, v, count, x, y
+
+  count = 0
+
+  x, y = term.getCursorPos()
+  
+  term.setCursorPos(1, 17)
+  term.write("--------------------------------------------------")
+  term.setCursorPos(1, 18)
+  term.clearLine()
+  term.write("Online: ")
+  
+  for i, v in ipairs(ONLINE) do
+    if i == 1 then
+      term.write(ONLINE[i])
+    else
+      term.write(", " .. ONLINE[i])
     end
 
-    addRequest(msg)
+    count = count + 1
+  end
+
+  if count == 0 then
+    term.write("There is nobody online at this moment")
+  end
+
+  term.setCursorPos(x, y)
+end
+
+-- Start the chat
+function start()
+  term.clear()
+  writeHeader()
+  writeOnlineList()
+
+  ACTIVE = true
+
+  showBuffer()
+  
+  parallel.waitForAll(input, watchEvents, receive)
+end
+
+-- Stop the application
+function stop()
+  ACTIVE = false
+end
+
+-- Reset the application
+function reset()
+  execute("/offline")
+  rednet.close(MODEM)
+  sleep(2)
+  os.reboot()
+end
+
+-- Watch all input to provide possible shortcuts (for example usernames)
+function watchEvents()
+  local type, param, param2, param3, i, v
+  
+  while ACTIVE do
+    type, param, param2, param3 = os.pullEvent()
   end
 end
 
-parallel.waitForAll(main, handleEvents, updateBuffer)
+-- Handle input from the prompt
+function input()
+  local message
+
+  term.setCursorPos(1, 4)
+  term.write("--------------------------------------------------")
+  
+  while ACTIVE do
+    term.setCursorPos(1, 3)
+    term.clearLine()
+    term.write("Send > ")
+
+    message = read()
+
+    if message ~= nil and message ~= "" then
+      execute(message, "local")
+    end
+  end
+end
+
+-- Send a message
+function send(message)
+  local request = {protocol = "rnc", nickname = NICKNAME, message = message}
+  rednet.broadcast(textutils.serialize(request))
+end
+
+-- Recieve a message
+function receive()
+  local sender, message, distance, request
+
+  while ACTIVE do
+    sender, message, distance = rednet.receive(1)
+
+    if message ~= nil and message ~= "" then
+      request = textutils.unserialize(message)
+      if request.protocol == "rnc" then
+        if request.nickname ~= nil and request.nickname ~= "" then
+          execute(request, "remote")
+        end
+      end
+    end
+  end
+end
+
+-- Execute a command or add a chat message
+function execute(message, source)
+  local command
+  
+  if message.nickname ~= nil then
+    executeRemote(message)
+    return
+  end
+
+  if message:sub(0, 1) == "/" then
+      command = message:sub(2)
+
+      if command == "quit" 
+          or command == "reset" 
+          or command == "restart"
+          or command == "reboot"
+          or command == "stop"
+        then 
+          appendBuffer("[RedNet Chat]: Restarting application")
+          reset()
+      elseif command == "online" then
+        if not ISONLINE then
+          send("/online")
+          putOnline()
+          appendBuffer("[RedNet Chat]: You are now online")
+          ISONLINE = true
+        else
+          appendBuffer("[RedNet Chat]: You are already online")
+        end
+      elseif command == "offline" then
+        if ISONLINE then
+          send("/offline")
+          takeOffline()
+          appendBuffer("[RedNet Chat]: You are now offline")
+          ISONLINE = false
+        else
+          appendBuffer("[RedNet Chat]: You are already offline")
+        end
+      elseif command:sub(0, 5) == "nick " then
+        takeOffline()
+        NICKNAME = command:sub(6)
+        putOnline()
+        appendBuffer("[RedNet Chat]: Your nickname has been changed")
+      elseif command:sub(0, 5) == "slap " then
+        appendBuffer(command:sub(6) .. " was slapped by " .. NICKNAME)
+      elseif command == "help" then
+        appendBuffer("[RedNet Chat] Commands:")
+        appendBuffer("/quit : Exit the chat")
+      end
+      
+      return
+  end
+
+  appendBuffer(NICKNAME .. ": " .. message)
+  send(message)
+end
+
+--
+function putOnline(nickname)
+  local i, v, exists
+
+  if nickname == nil then
+    nickname = NICKNAME
+  end
+
+  for i, v in ipairs(ONLINE) do
+    if ONLINE[i] == nickname then
+      exists = true
+    end
+  end
+  
+  if not exists then
+    table.insert(ONLINE, nickname)
+  end
+
+  writeOnlineList()
+end
+
+--
+function takeOffline(nickname)
+  local i, v
+
+  if nickname == nil then
+    nickname = NICKNAME
+  end
+
+  for i, v in ipairs(ONLINE) do
+    if ONLINE[i] == nickname then
+      table.remove(ONLINE, i)
+    end
+  end
+
+  writeOnlineList()
+end
+
+--
+function executeRemote(request)
+  local command
+
+  if request.message:sub(0, 1) == "/" then
+    command = request.message:sub(2)
+
+    if command == "online" then
+      putOnline(request.nickname)
+      appendBuffer("[RedNet Chat]: " .. request.nickname .. " is now online")
+      send("/metoo")
+    elseif command == "offline" then
+      takeOffline(request.nickname)
+      appendBuffer("[RedNet Chat]: " .. request.nickname .. " is now offline")
+    elseif command == "metoo" then
+      putOnline(request.nickname)
+    end
+    return
+  end
+
+  appendBuffer(request.nickname .. ": " .. request.message)
+end
+
+--
+function appendBuffer(message)
+  local length
+
+  length = message:len()
+
+  if length > 50 then
+    table.insert(BUFFER, message:sub(1, 50))
+    POINTER = POINTER + 1 
+    appendBuffer(message:sub(51))
+  else
+    table.insert(BUFFER, message)
+    POINTER = POINTER + 1 
+  end
+ 
+  showBuffer()
+end
+
+--
+function showBuffer()
+  local i, line, bufferPointer, x, y
+  
+  if POINTER == 0 then
+    return
+  end
+
+  x, y = term.getCursorPos()
+  
+  line = 5
+ 
+  bufferPointer = -(11 - POINTER)
+  
+  for i = bufferPointer, bufferPointer + 11 do
+    term.setCursorPos(1, line)
+    term.clearLine()
+    
+    if BUFFER[i] ~= nil then
+      term.write(tostring(BUFFER[i]))
+    end
+    
+    line = line + 1
+  end
+
+  term.setCursorPos(x, y)
+end
+
+-- Fire up the application
+main()
