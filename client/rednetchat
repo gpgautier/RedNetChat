@@ -8,7 +8,7 @@
 -- [ Pastebin: http://pastebin.com/JDU4wJxX                                ] --
 -- [ --------------------------------------------------------------------- ] --
 
-local VERSION = "0.5"
+local VERSION = "0.6"
 local MODEM = nil
 local NICKNAME = nil
 local ACTIVE = false
@@ -16,24 +16,57 @@ local BUFFER = {}
 local POINTER = 0
 local ONLINE = {}
 local ISONLINE = false
+local ID = os.computerID()
+local LAST_MSG_TARGET = nil
+local CHANNEL = 1
+local SCROLL_POINTER = POINTER
+local WIDTH, HEIGHT = term.getSize()
+local LINES = HEIGHT - 6
+local START_LINE = 5
+local OPERATOR = "RNC"
 
 -- [ --------------------------------------------------------------------- ] --
+
+-- Split a string
+function split(str, pat)
+    local t = {}  -- NOTE: use {n = 0} in Lua-5.0
+    if str ~= nil then
+       local fpat = "(.-)" .. pat
+       local last_end = 1
+       local s, e, cap = str:find(fpat, 1)
+       while s do
+          if s ~= 1 or cap ~= "" then
+            table.insert(t,cap)
+          end
+          last_end = e+1
+          s, e, cap = str:find(fpat, last_end)
+       end
+       if last_end <= #str then
+          cap = str:sub(last_end)
+          table.insert(t, cap)
+       end
+    else
+        print("##ERROR failed to split ["..str.."] by:"..pat)
+    end
+    return t
+end
+
+-- Log a message to file
+function log(message)
+  local file = io.open("rednetchat.log", "a")
+  file:write("\n" .. message)
+  file:close()
+end
 
 -- Application entry
 function main()
   term.clear()
   term.setCursorPos(1, 1)
-  print("Starting RedNetChat " .. VERSION)
 
   if not setPeripherals() then
+    print("[FATAL ERROR] Not able to setup peripherals.")
     return false
   end
-  
-  print("")
-  print("")
-  print("Peripherals are setup.")
-  print("")
-  term.write("Starting application")
   
   welcome()
 end
@@ -42,13 +75,13 @@ end
 function setPeripherals()
   local i, side
 
-  for i, side in pairs(redstone.getSides()) do
+  for i, side in pairs(rs.getSides()) do
     if peripheral.isPresent(side) then
       if peripheral.getType(side) == "modem" then
         MODEM = side
-        print("")
-        term.write("Opening modem on " .. side)
-        rednet.open(MODEM)
+        if not rednet.isOpen(side) then
+          rednet.open(MODEM)
+        end
       end
     end
   end
@@ -68,6 +101,7 @@ function welcome()
 
   term.clear()
   writeHeader()
+
   print("")
   print("")
   print("Enter a nickname and press [enter].")
@@ -80,7 +114,7 @@ function welcome()
     term.setCursorPos(x, y)
     NICKNAME = read()
     execute("/online")
-    appendBuffer("[RedNet Chat]: Type /help for a list of commands")
+    appendBuffer("[" .. OPERATOR .. "]: Type /help for a list of commands")
   end
   
   start()
@@ -88,38 +122,47 @@ end
 
 -- Writes the screen header
 function writeHeader()
+  local col
+
   term.setCursorPos(1, 1)
-  term.write("RedNet Chat " .. VERSION .. "           by GPG Incorporated")
+  term.write("RedNet Chat " .. VERSION .. "")
   term.setCursorPos(1, 2)
-  term.write("--------------------------------------------------")
+
+  for col = 1, WIDTH do
+    term.write("-")
+  end
 end
 
 -- Writes the list of online users
 function writeOnlineList()
-  local i, v, count, x, y
+  local i, v, count, x, y, col
 
   count = 0
 
   x, y = term.getCursorPos()
   
-  term.setCursorPos(1, 17)
-  term.write("--------------------------------------------------")
-  term.setCursorPos(1, 18)
+  term.setCursorPos(1, HEIGHT - 1)
+
+  for col = 1, WIDTH do
+    term.write("-")
+  end
+  
+  term.setCursorPos(1, HEIGHT)
   term.clearLine()
   term.write("Online: ")
-  
-  for i, v in ipairs(ONLINE) do
-    if i == 1 then
-      term.write(ONLINE[i])
+
+  for i, v in pairs(ONLINE) do
+    if count == 0 then
+      term.write(i)
     else
-      term.write(", " .. ONLINE[i])
+      term.write(", " .. i)
     end
 
     count = count + 1
   end
 
   if count == 0 then
-    term.write("There is nobody online at this moment")
+    term.write("Nobody online in channel " .. CHANNEL)
   end
 
   term.setCursorPos(x, y)
@@ -135,7 +178,7 @@ function start()
 
   showBuffer()
   
-  parallel.waitForAll(input, watchEvents, receive)
+  parallel.waitForAll(input, watchEvents)
 end
 
 -- Stop the application
@@ -146,8 +189,12 @@ end
 -- Reset the application
 function reset()
   execute("/offline")
-  rednet.close(MODEM)
-  sleep(2)
+
+  if rednet.isOpen(MODEM) then
+    rednet.close(MODEM)
+  end
+
+  sleep(1.5)
   os.reboot()
 end
 
@@ -157,20 +204,51 @@ function watchEvents()
   
   while ACTIVE do
     type, param, param2, param3 = os.pullEvent()
+
+    if type == "key" then
+      if param == 200 then -- up
+        scroll(-1)
+      elseif param == 208 then -- down
+        scroll(1)
+      elseif param == 201 then -- pageup
+        scroll(-12)
+      elseif param == 209 then -- pagedown
+        scroll(12)
+      --else
+      --  appendBuffer(tostring(param))
+      end
+    elseif type == "mouse_scroll" then
+      if param == -1 then
+        scroll(-1)
+      else
+        scroll(1)
+      end
+    elseif type == "rednet_message" then
+      receive(param2)
+    end
   end
+end
+
+-- Scroll through the chat
+function scroll(amount)
+  SCROLL_POINTER = SCROLL_POINTER + amount
+  showBuffer()
 end
 
 -- Handle input from the prompt
 function input()
-  local message
+  local message, col
 
   term.setCursorPos(1, 4)
-  term.write("--------------------------------------------------")
   
+  for col = 1, WIDTH do
+    term.write("-")
+  end
+
   while ACTIVE do
     term.setCursorPos(1, 3)
     term.clearLine()
-    term.write("Send > ")
+    term.write("[" .. CHANNEL .. "] > ")
 
     message = read()
 
@@ -181,24 +259,40 @@ function input()
 end
 
 -- Send a message
-function send(message)
-  local request = {protocol = "rnc", nickname = NICKNAME, message = message}
-  rednet.broadcast(textutils.serialize(request))
+function send(message, target)
+  local request, serialized, x, encrypted
+
+  request = {protocol = "rnc", nickname = NICKNAME, sender = ID, target = target, channel = CHANNEL, message = message}
+  serialized = textutils.serialize(request)
+
+  encrypted = ""
+  for x = 1, #serialized do
+    encrypted = encrypted .. string.char(serialized:byte(x) + 1)
+  end
+
+  if request.target ~= nil then      
+    rednet.send(request.target, encrypted)
+  else
+    rednet.broadcast(encrypted)
+  end
 end
 
 -- Recieve a message
-function receive()
-  local sender, message, distance, request
+function receive(message)
+  local request, decrypted, x
 
-  while ACTIVE do
-    sender, message, distance = rednet.receive(1)
+  if message ~= nil and message ~= "" then
 
-    if message ~= nil and message ~= "" then
-      request = textutils.unserialize(message)
-      if request.protocol == "rnc" then
-        if request.nickname ~= nil and request.nickname ~= "" then
-          execute(request, "remote")
-        end
+    decrypted = ""
+    for x = 1, #message do
+      decrypted = decrypted .. string.char(message:byte(x) - 1)
+    end
+
+    request = textutils.unserialize(decrypted)
+
+    if request.protocol == "rnc" and request.channel == CHANNEL then
+      if request.nickname ~= nil and request.nickname ~= "" then
+        execute(request, "remote")
       end
     end
   end
@@ -206,7 +300,7 @@ end
 
 -- Execute a command or add a chat message
 function execute(message, source)
-  local command
+  local command, splitCommand, nickname, id, body, onlineUser
   
   if message.nickname ~= nil then
     executeRemote(message)
@@ -222,36 +316,74 @@ function execute(message, source)
           or command == "reboot"
           or command == "stop"
         then 
-          appendBuffer("[RedNet Chat]: Restarting application")
+          appendBuffer("[" .. OPERATOR .. "]: Stopping application")
           reset()
       elseif command == "online" then
         if not ISONLINE then
           send("/online")
           putOnline()
-          appendBuffer("[RedNet Chat]: You are now online")
+          appendBuffer("[" .. OPERATOR .. "]: You are now online")
           ISONLINE = true
         else
-          appendBuffer("[RedNet Chat]: You are already online")
+          appendBuffer("[" .. OPERATOR .. "]: You are already online")
         end
       elseif command == "offline" then
         if ISONLINE then
           send("/offline")
           takeOffline()
-          appendBuffer("[RedNet Chat]: You are now offline")
+          appendBuffer("[" .. OPERATOR .. "]: You are now offline")
           ISONLINE = false
         else
-          appendBuffer("[RedNet Chat]: You are already offline")
+          appendBuffer("[" .. OPERATOR .. "]: You are already offline")
         end
       elseif command:sub(0, 5) == "nick " then
         takeOffline()
         NICKNAME = command:sub(6)
         putOnline()
-        appendBuffer("[RedNet Chat]: Your nickname has been changed")
+        appendBuffer("[" .. OPERATOR .. "]: Your nickname has been changed")
       elseif command:sub(0, 5) == "slap " then
         appendBuffer(command:sub(6) .. " was slapped by " .. NICKNAME)
+      elseif command:sub(0, 4) == "msg " then
+        splitCommand = split(command:sub(5), "%s")
+
+        onlineUser = false
+
+        for nickname, id in pairs(ONLINE) do
+          if nickname == splitCommand[1] then
+            body = command:sub(5 + splitCommand[1]:len() + 1)
+            send(body, id)
+            appendBuffer(NICKNAME .. " > " .. nickname .. ": " .. body)
+            onlineUser = true
+            LAST_MSG_TARGET = nickname
+          end
+        end
+
+        if not onlineUser then
+            appendBuffer("[" .. OPERATOR .. "]: User " .. splitCommand[1] .. " is not online")
+        end
+      elseif command:sub(0, 2) == "r " then
+        if LAST_MSG_TARGET ~= nil then
+          execute("/msg " .. LAST_MSG_TARGET .. " " .. command:sub(3), "local")
+        else
+          appendBuffer("[" .. OPERATOR .. "]: No valid user for message")
+        end
+      elseif command:sub(0, 5) == "join " then
+        if CHANNEL ~= tonumber(command:sub(6)) then
+          execute("/offline")
+          CHANNEL = tonumber(command:sub(6))
+          execute("/online")
+          appendBuffer("[" .. OPERATOR .. "]: Joined channel " .. CHANNEL)
+        else
+          appendBuffer("[" .. OPERATOR .. "]: Already in channel " .. CHANNEL)
+        end
       elseif command == "help" then
-        appendBuffer("[RedNet Chat] Commands:")
+        appendBuffer("[" .. OPERATOR .. "] Commands:")
         appendBuffer("/quit : Exit the chat")
+        appendBuffer("/msg <nickname> <message> : Send a private message")
+        appendBuffer("/r <message> : Reply to a private message")
+        appendBuffer("/join <channel> : Switch channel")
+      else
+        appendBuffer("[" .. OPERATOR .. "]: Unknown command")
       end
       
       return
@@ -262,39 +394,25 @@ function execute(message, source)
 end
 
 --
-function putOnline(nickname)
-  local i, v, exists
-
-  if nickname == nil then
+function putOnline(nickname, id)
+  if nickname == nil or id == nil then
     nickname = NICKNAME
+    id = ID
   end
 
-  for i, v in ipairs(ONLINE) do
-    if ONLINE[i] == nickname then
-      exists = true
-    end
-  end
-  
-  if not exists then
-    table.insert(ONLINE, nickname)
-  end
+  ONLINE[nickname] = id
 
   writeOnlineList()
 end
 
 --
-function takeOffline(nickname)
-  local i, v
-
-  if nickname == nil then
+function takeOffline(nickname, id)
+  if nickname == nil or id == nil then
     nickname = NICKNAME
+    id = ID
   end
 
-  for i, v in ipairs(ONLINE) do
-    if ONLINE[i] == nickname then
-      table.remove(ONLINE, i)
-    end
-  end
+  ONLINE[nickname] = nil
 
   writeOnlineList()
 end
@@ -307,19 +425,24 @@ function executeRemote(request)
     command = request.message:sub(2)
 
     if command == "online" then
-      putOnline(request.nickname)
-      appendBuffer("[RedNet Chat]: " .. request.nickname .. " is now online")
+      putOnline(request.nickname, request.sender)
+      appendBuffer("[" .. OPERATOR .. "]: " .. request.nickname .. " is now online")
       send("/metoo")
     elseif command == "offline" then
-      takeOffline(request.nickname)
-      appendBuffer("[RedNet Chat]: " .. request.nickname .. " is now offline")
+      takeOffline(request.nickname, request.sender)
+      appendBuffer("[" .. OPERATOR .. "]: " .. request.nickname .. " is now offline")
     elseif command == "metoo" then
-      putOnline(request.nickname)
+      putOnline(request.nickname, request.sender)
     end
     return
   end
 
-  appendBuffer(request.nickname .. ": " .. request.message)
+  if request.target ~= nil then
+    appendBuffer(request.nickname .. " > " .. NICKNAME .. ": " .. request.message)
+    LAST_MSG_TARGET = request.nickname
+  else
+    appendBuffer(request.nickname .. ": " .. request.message)
+  end
 end
 
 --
@@ -328,33 +451,46 @@ function appendBuffer(message)
 
   length = message:len()
 
-  if length > 50 then
-    table.insert(BUFFER, message:sub(1, 50))
+  if length > WIDTH then
+    table.insert(BUFFER, message:sub(1, WIDTH))
     POINTER = POINTER + 1 
-    appendBuffer(message:sub(51))
+    appendBuffer(message:sub(WIDTH + 1))
   else
     table.insert(BUFFER, message)
     POINTER = POINTER + 1 
   end
+
+  SCROLL_POINTER = POINTER
  
   showBuffer()
 end
 
 --
 function showBuffer()
-  local i, line, bufferPointer, x, y
+  local i, line, bufferPointer, x, y, pointer
+
+  pointer = SCROLL_POINTER
   
-  if POINTER == 0 then
+  if pointer == 0 then
     return
+  elseif SCROLL_POINTER > POINTER then
+    SCROLL_POINTER = POINTER
+    pointer = POINTER
+  elseif POINTER < LINES + 1 then
+    SCROLL_POINTER = POINTER
+    pointer = POINTER 
+  elseif POINTER > LINES and SCROLL_POINTER < LINES then
+    SCROLL_POINTER = LINES
+    pointer = SCROLL_POINTER
   end
 
   x, y = term.getCursorPos()
   
-  line = 5
+  line = START_LINE
  
-  bufferPointer = -(11 - POINTER)
+  bufferPointer = -(LINES - 1 - pointer)
   
-  for i = bufferPointer, bufferPointer + 11 do
+  for i = bufferPointer, bufferPointer + (LINES - 1) do
     term.setCursorPos(1, line)
     term.clearLine()
     
